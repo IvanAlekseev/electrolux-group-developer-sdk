@@ -5,6 +5,7 @@ import pytest
 from aioresponses import aioresponses
 
 from electrolux_group_developer_sdk.auth.invalid_credentials_exception import InvalidCredentialsException
+from electrolux_group_developer_sdk.auth.invalid_grant_exception import InvalidGrantException
 from electrolux_group_developer_sdk.auth.token_manager import TokenManager
 from electrolux_group_developer_sdk.auth.token_refresh_failed import TokenRefreshFailedException
 
@@ -234,3 +235,62 @@ class TestTokenManager():
 
             with pytest.raises(TokenRefreshFailedException):
                 await token_manager.get_auth_data()
+
+    def test_invalid_grant_exception_hierarchy(self):
+        assert issubclass(InvalidGrantException, TokenRefreshFailedException)
+
+    @pytest.mark.asyncio
+    async def test_get_auth_data_raises_invalid_grant_on_400(self):
+        token_manager = TokenManager(generate_token(-120), "mock_refresh", "mock_key")
+        with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            with pytest.raises(InvalidGrantException):
+                await token_manager.get_auth_data()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_async", [False, True])
+    async def test_on_auth_failed_callback(self, is_async):
+        called_with = []
+        token_manager = TokenManager(
+            generate_token(-120), "mock_refresh", "mock_key",
+            on_auth_failed=(lambda err: called_with.append(err)) if not is_async else (lambda err: (called_with.append(err), None)[1]),
+        )
+        if is_async:
+            async def async_cb(err):
+                called_with.append(err)
+            token_manager.on_auth_failed = async_cb
+
+        with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            assert await token_manager.refresh_token() is False
+
+        assert len(called_with) == 1
+        assert isinstance(called_with[0], InvalidGrantException)
+
+    @pytest.mark.asyncio
+    async def test_on_auth_failed_not_called_on_transient_error(self):
+        called = []
+        token_manager = TokenManager(
+            generate_token(-120), "mock_refresh", "mock_key",
+            on_auth_failed=lambda err: called.append(err),
+        )
+        with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=500)
+            with pytest.raises(TokenRefreshFailedException) as exc_info:
+                await token_manager.get_auth_data()
+            assert not isinstance(exc_info.value, InvalidGrantException)
+        assert len(called) == 0
+
+    @pytest.mark.asyncio
+    async def test_on_auth_failed_callback_exception_isolated(self):
+        def faulty_callback(err):
+            raise RuntimeError("Buggy user callback")
+
+        token_manager = TokenManager(
+            generate_token(-120), "mock_refresh", "mock_key",
+            on_auth_failed=faulty_callback,
+        )
+        with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            assert await token_manager.refresh_token() is False
+
