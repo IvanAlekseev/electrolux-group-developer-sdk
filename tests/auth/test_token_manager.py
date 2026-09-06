@@ -1,11 +1,14 @@
+import asyncio
 import time
 
 import jwt
 import pytest
 from aioresponses import aioresponses
+from yarl import URL
 
 from electrolux_group_developer_sdk.auth.invalid_credentials_exception import InvalidCredentialsException
-from electrolux_group_developer_sdk.auth.token_manager import TokenManager
+from electrolux_group_developer_sdk.auth.invalid_token_exception import InvalidTokenException
+from electrolux_group_developer_sdk.auth.token_manager import TokenManager, get_user_id_from_token
 from electrolux_group_developer_sdk.auth.token_refresh_failed import TokenRefreshFailedException
 
 
@@ -19,7 +22,7 @@ def generate_token(exp_seconds_from_now):
             "exp": time.time() + exp_seconds_from_now,
             "sub": "test-user"
         }
-    return jwt.encode(payload, "test-secret", algorithm="HS256")
+    return jwt.encode(payload, "test-secret-at-least-32-bytes-long", algorithm="HS256")
 
 
 ACCESS_TOKEN = generate_token(120)
@@ -234,3 +237,95 @@ class TestTokenManager():
 
             with pytest.raises(TokenRefreshFailedException):
                 await token_manager.get_auth_data()
+
+    def test_is_token_valid_malformed_jwt(self):
+        manager = TokenManager("not-a-valid-jwt-token", "mock_refresh_token", "mock_api_key")
+        assert manager.is_token_valid() is False
+
+    def test_is_token_valid_configurable_buffer(self):
+        # Token expires in 45 seconds
+        token = generate_token(45)
+        # Default buffer is 60.0s -> 45s remaining is less than 60s -> False
+        manager_default = TokenManager(token, "mock_refresh_token", "mock_api_key")
+        assert manager_default.is_token_valid() is False
+
+        # Configured buffer of 30.0s -> 45s remaining is more than 30s -> True
+        manager_custom = TokenManager(
+            token, "mock_refresh_token", "mock_api_key", refresh_buffer_seconds=30.0
+        )
+        assert manager_custom.is_token_valid() is True
+
+        # Override via parameter in is_token_valid(buffer_seconds=...)
+        assert manager_default.is_token_valid(buffer_seconds=30.0) is True
+        assert manager_custom.is_token_valid(buffer_seconds=50.0) is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_concurrent_lock(self):
+        token_manager = TokenManager(
+            access_token=EXPIRED_ACCESS_TOKEN,
+            refresh_token="mock_refresh_token",
+            api_key="mock_api_key",
+        )
+        refresh_url = "https://api.developer.electrolux.one/api/v1/token/refresh"
+
+        with aioresponses() as mocked:
+            mocked.post(
+                refresh_url,
+                payload={
+                    "accessToken": NEW_ACCESS_TOKEN,
+                    "refreshToken": "new_refresh_token",
+                },
+            )
+
+            # Launch 5 concurrent refresh_token calls
+            results = await asyncio.gather(
+                token_manager.refresh_token(),
+                token_manager.refresh_token(),
+                token_manager.refresh_token(),
+                token_manager.refresh_token(),
+                token_manager.refresh_token(),
+            )
+
+            assert all(r is True for r in results)
+            # Exactly 1 HTTP request made due to deduplication
+            assert len(mocked.requests[("POST", URL(refresh_url))]) == 1
+            assert token_manager._auth_data.access_token == NEW_ACCESS_TOKEN
+            assert token_manager._auth_data.refresh_token == "new_refresh_token"
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_already_valid_no_force(self):
+        token_manager = TokenManager(ACCESS_TOKEN, "mock_refresh_token", "mock_api_key")
+        # Token is valid and force=False -> returns True without making any HTTP request
+        assert await token_manager.refresh_token(force=False) is True
+
+    @pytest.mark.asyncio
+    async def test_get_auth_data_force_refresh(self):
+        token = generate_token(120)
+        token_manager = TokenManager(
+            access_token=token,
+            refresh_token="mock_refresh_token",
+            api_key="mock_api_key",
+        )
+        refresh_url = "https://api.developer.electrolux.one/api/v1/token/refresh"
+
+        with aioresponses() as mocked:
+            # Without force_refresh, no refresh is performed
+            auth_data1 = await token_manager.get_auth_data(force_refresh=False)
+            assert auth_data1.access_token == token
+
+            # With force_refresh=True, refresh is invoked even though token is valid
+            mocked.post(
+                refresh_url,
+                payload={
+                    "accessToken": NEW_ACCESS_TOKEN,
+                    "refreshToken": "new_refresh_token",
+                },
+            )
+            auth_data2 = await token_manager.get_auth_data(force_refresh=True)
+            assert auth_data2.access_token == NEW_ACCESS_TOKEN
+            assert auth_data2.refresh_token == "new_refresh_token"
+
+    def test_get_user_id_from_token_decode_error(self):
+        with pytest.raises(InvalidTokenException, match="Failed to decode token"):
+            get_user_id_from_token("invalid-token-string")
+
