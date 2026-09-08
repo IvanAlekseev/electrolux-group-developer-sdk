@@ -48,7 +48,6 @@ class TokenManager:
         self.refresh_buffer_seconds = refresh_buffer_seconds
         self._refresh_lock = asyncio.Lock()
         self._auth_data = AuthData(access_token, refresh_token, api_key)
-        self.update(access_token, refresh_token, api_key)
 
     def update(self, access_token: str, refresh_token: str, api_key: str) -> None:
         """Update the authentication data."""
@@ -136,21 +135,22 @@ class TokenManager:
                 return False
 
     async def revoke_token(self) -> bool:
-        auth_data = self._auth_data
-        if not auth_data or auth_data.refresh_token is None:
-            raise InvalidCredentialsException("Missing refresh token")
+        async with self._refresh_lock:
+            auth_data = self._auth_data
+            if not auth_data or auth_data.refresh_token is None:
+                raise InvalidCredentialsException("Missing refresh token")
 
-        payload = {REFRESH_TOKEN: auth_data.refresh_token}
+            payload = {REFRESH_TOKEN: auth_data.refresh_token}
 
-        try:
-            await request(method=POST, url=TOKEN_REVOKE_URL, json_body=payload)
+            try:
+                await request(method=POST, url=TOKEN_REVOKE_URL, json_body=payload)
 
-            self._auth_data = None
+                self._auth_data = None
 
-            return True
-        except Exception as e:
-            _LOGGER.error("Error during token revoke: %s", e)
-            return False
+                return True
+            except Exception as e:
+                _LOGGER.error("Error during token revoke: %s", e)
+                return False
 
     async def get_auth_data(self, force_refresh: bool = False) -> AuthData:
         auth_data = self._auth_data

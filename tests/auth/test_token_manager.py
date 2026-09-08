@@ -38,6 +38,24 @@ class TestTokenManager():
         assert token_manager._auth_data.refresh_token == "new_mock_refresh_token"
         assert token_manager._auth_data.api_key == "mock_api_key"
 
+    def test_init_does_not_trigger_on_token_update(self):
+        callback_called = False
+
+        def on_update(access_token, refresh_token, api_key):
+            nonlocal callback_called
+            callback_called = True
+
+        token_manager = TokenManager(
+            ACCESS_TOKEN,
+            "mock_refresh_token",
+            "mock_api_key",
+            on_token_update=on_update,
+        )
+        assert callback_called is False
+
+        token_manager.update(NEW_ACCESS_TOKEN, "new_refresh_token", "mock_api_key")
+        assert callback_called is True
+
     def test_get_user_id_success(self):
         token = generate_token(120)
 
