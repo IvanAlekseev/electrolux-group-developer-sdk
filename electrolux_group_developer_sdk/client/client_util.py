@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 
 import aiohttp
@@ -10,7 +11,7 @@ from ..client.rate_limiter import RateLimiter
 _LOGGER = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
-RETRY_STATUS_CODES = {429, 504}
+RETRY_STATUS_CODES = {429, 502, 503, 504}
 INITIAL_BACKOFF = 1
 MAX_BACKOFF = 30
 
@@ -18,11 +19,21 @@ rate_limiter = RateLimiter(max_calls=10, period=1.0)  # 10 calls per second
 concurrency_semaphore = asyncio.Semaphore(5)  # 5 concurrent calls
 
 
+@asynccontextmanager
+async def _get_session(session: Optional[aiohttp.ClientSession]):
+    if session is not None and not session.closed:
+        yield session
+    else:
+        async with aiohttp.ClientSession() as new_session:
+            yield new_session
+
+
 async def request(
         method: str,
         url: str,
         headers: Optional[Dict[str, str]] = None,
-        json_body: Optional[Dict[str, Any]] = None
+        json_body: Optional[Dict[str, Any]] = None,
+        session: Optional[aiohttp.ClientSession] = None,
 ) -> Any:
     """
     Make an HTTP request with retry, rate limiting, and concurrency control.
@@ -32,6 +43,7 @@ async def request(
         url: Full URL to call
         headers: Optional HTTP headers
         json_body: Optional JSON body for POST/PUT
+        session: Optional external aiohttp ClientSession to reuse
     """
     allow_retry_statuses = RETRY_STATUS_CODES
 
@@ -40,8 +52,8 @@ async def request(
 
         try:
             async with concurrency_semaphore:
-                async with aiohttp.ClientSession() as session:
-                    async with session.request(
+                async with _get_session(session) as client_session:
+                    async with client_session.request(
                             method=method,
                             url=url,
                             headers=headers,
@@ -49,7 +61,10 @@ async def request(
                     ) as response:
 
                         if response.status not in allow_retry_statuses:
-                            response_body = await response.json()
+                            try:
+                                response_body = await response.json()
+                            except (aiohttp.ContentTypeError, ValueError):
+                                response_body = await response.text()
                             status = response.status
                             if 400 <= response.status < 600:
                                 raise aiohttp.ClientResponseError(
@@ -71,6 +86,11 @@ async def request(
         except aiohttp.ClientResponseError as e:
             if attempt == MAX_ATTEMPTS or e.status not in allow_retry_statuses:
                 raise e
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt == MAX_ATTEMPTS:
+                _LOGGER.warning("Request failed after %s attempts due to network error: %s", MAX_ATTEMPTS, e)
+                raise e
+            _LOGGER.debug("Network error on attempt %s of %s: %s. Retrying...", attempt, MAX_ATTEMPTS, e)
 
         # Wait before next attempt
         backoff = min(INITIAL_BACKOFF * 2 ** (attempt - 1), MAX_BACKOFF)
