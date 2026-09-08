@@ -89,7 +89,7 @@ class TokenManager:
                 options={"verify_signature": False, "verify_exp": False},
             )
             exp = payload.get("exp")
-            if exp is None:
+            if exp is None or not isinstance(exp, (int, float)):
                 return False
 
             current_time = time.time()
@@ -100,7 +100,7 @@ class TokenManager:
             )
             return (exp - current_time) > buffer
 
-        except jwt.PyJWTError as e:
+        except (jwt.PyJWTError, TypeError) as e:
             _LOGGER.error("Access Token is invalid - %s", e)
             return False
 
@@ -112,6 +112,10 @@ class TokenManager:
             raise InvalidCredentialsException("Missing refresh token")
 
         initial_token = auth_data.access_token
+
+        cb_to_call = None
+        cb_arg = None
+        refresh_success = False
 
         async with self._refresh_lock:
             # If another task refreshed the token while waiting on the lock, reuse it
@@ -136,25 +140,29 @@ class TokenManager:
                     api_key=auth_data.api_key,
                 )
                 self._last_refresh_error = None
-
-                return True
+                refresh_success = True
             except Exception as e:
                 _LOGGER.error("Error during token refresh: %s", e)
-                if (isinstance(e, aiohttp.ClientResponseError) and e.status == 400) or "invalid_grant" in str(e).lower():
+                if (isinstance(e, aiohttp.ClientResponseError) and e.status in (400, 401)) or "invalid_grant" in str(e).lower():
                     self._last_refresh_error = InvalidGrantException(f"Token refresh rejected (invalid_grant): {e}")
-                    if self.on_auth_failed:
-                        try:
-                            try:
-                                res = self.on_auth_failed(self._last_refresh_error)
-                            except TypeError:
-                                res = self.on_auth_failed()
-                            if inspect.isawaitable(res):
-                                await res
-                        except Exception as err:
-                            _LOGGER.warning("Error in on_auth_failed callback: %s", err)
+                    cb_to_call = self.on_auth_failed
+                    cb_arg = self._last_refresh_error
                 else:
                     self._last_refresh_error = e
-                return False
+                refresh_success = False
+
+        if cb_to_call:
+            try:
+                try:
+                    res = cb_to_call(cb_arg)
+                except TypeError:
+                    res = cb_to_call()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as err:
+                _LOGGER.warning("Error in on_auth_failed callback: %s", err)
+
+        return refresh_success
 
     async def revoke_token(self) -> bool:
         auth_data = self._auth_data

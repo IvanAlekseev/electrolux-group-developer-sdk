@@ -325,10 +325,11 @@ class TestTokenManager():
         assert issubclass(InvalidGrantException, TokenRefreshFailedException)
 
     @pytest.mark.asyncio
-    async def test_get_auth_data_raises_invalid_grant_on_400(self):
+    @pytest.mark.parametrize("status_code", [400, 401])
+    async def test_get_auth_data_raises_invalid_grant_on_auth_error(self, status_code):
         token_manager = TokenManager(generate_token(-120), "mock_refresh", "mock_key")
         with aioresponses() as mocked:
-            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=status_code)
             with pytest.raises(InvalidGrantException):
                 await token_manager.get_auth_data()
 
@@ -378,3 +379,28 @@ class TestTokenManager():
         with aioresponses() as mocked:
             mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
             assert await token_manager.refresh_token() is False
+
+    def test_is_token_valid_non_numeric_exp(self):
+        token = jwt.encode({"sub": "test-user", "exp": "not-a-timestamp"}, "test-secret-at-least-32-bytes-long", algorithm="HS256")
+        manager = TokenManager(token, "mock_refresh_token", "mock_api_key")
+        assert manager.is_token_valid() is False
+
+    @pytest.mark.asyncio
+    async def test_on_auth_failed_callback_does_not_deadlock_on_lock(self):
+        """Verify that a callback querying token_manager does not deadlock on _refresh_lock."""
+        reentrant_called = []
+
+        async def reentrant_callback(err):
+            reentrant_called.append(err)
+            # Accessing is_token_valid or lock-requiring methods shouldn't hang
+            assert token_manager._refresh_lock.locked() is False
+
+        token_manager = TokenManager(
+            generate_token(-120), "mock_refresh", "mock_key",
+            on_auth_failed=reentrant_callback,
+        )
+        with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            assert await token_manager.refresh_token() is False
+
+        assert len(reentrant_called) == 1
