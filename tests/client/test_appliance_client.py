@@ -1015,3 +1015,120 @@ async def test_request_html_proxy_error_fallback():
                 await client.get_appliances()
 
             assert "500 Internal Server Error" in str(exc_info.value)
+
+
+def test_apply_sse_update_null_value():
+    """Verify that apply_sse_update preserves valid null/None values (e.g. timeToEnd reset)."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {"userSelections": {"timeToEnd": 300}}},
+    )
+    event = {"property": "userSelections/timeToEnd", "value": None}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["userSelections"]["timeToEnd"] is None
+
+
+def test_apply_sse_update_missing_value_ignored():
+    """Verify that events without a 'value' field are ignored with a warning."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {"timeToEnd": 300}},
+    )
+    event = {"property": "timeToEnd"}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["timeToEnd"] == 300
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_multiline_sse_event():
+    """Verify that start_event_stream conforms to WHATWG SSE by joining multi-line data fields."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    received_events = []
+    client.add_listener("test_app_1", lambda ev: received_events.append(ev))
+
+    protocol = MagicMock()
+    reader = aiohttp.StreamReader(protocol, limit=2**16)
+    # Feed an SSE event split across two data: lines
+    reader.feed_data(
+        b'data: {"applianceId": "test_app_1",\n'
+        b'data: "property": "timeToEnd", "value": 60}\n\n'
+    )
+    reader.feed_eof()
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content = reader
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream()
+
+    assert len(received_events) == 1
+    assert received_events[0] == {
+        "applianceId": "test_app_1",
+        "property": "timeToEnd",
+        "value": 60,
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_auth_error_refreshes_token():
+    """Verify that receiving 401 or 403 on SSE connection triggers token refresh."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    mock_token_manager.refresh_token = AsyncMock()
+
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    # First attempt: 401 Unauthorized
+    mock_resp_401 = MagicMock()
+    mock_resp_401.status = 401
+
+    # Second attempt: raise CancelledError to end test
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(
+        side_effect=[mock_resp_401, asyncio.CancelledError("Stop test")]
+    )
+    mock_session.get.return_value.__aexit__ = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with pytest.raises(asyncio.CancelledError):
+            await client.start_event_stream()
+
+    mock_token_manager.refresh_token.assert_awaited_once()

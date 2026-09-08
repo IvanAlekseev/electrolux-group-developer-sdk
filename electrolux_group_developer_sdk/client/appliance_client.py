@@ -453,6 +453,14 @@ class ApplianceClient:
                     timeout=ClientTimeout(total=None, sock_connect=10, sock_read=120),
                     headers=headers,
                 ) as resp:
+                    if resp.status in (401, 403):
+                        _LOGGER.warning("SSE stream returned HTTP %s. Refreshing auth token...", resp.status)
+                        await self._token_manager.refresh_token()
+                        current_backoff = initial_backoff
+                        continue
+
+                    resp.raise_for_status()
+
                     _LOGGER.info("Connected to SSE stream at %s", url)
 
                     if do_on_livestream_opening_list:
@@ -461,7 +469,7 @@ class ApplianceClient:
                             await callback()
 
                     while True:
-                        data_line = None
+                        data_lines: list[str] = []
 
                         while True:  # read one SSE event
                             if resp.closed:
@@ -478,15 +486,17 @@ class ApplianceClient:
                                 _LOGGER.warning("SSE connection ended by server")
                                 raise ConnectionError("SSE connection closed by server")
 
-                            line_str = line.decode().strip()
+                            line_str = line.decode("utf-8", errors="replace").strip()
 
                             if line_str.startswith("data:"):
-                                data_line = line_str.removeprefix("data:").strip()
+                                data_lines.append(line_str.removeprefix("data:").strip())
                             elif line_str == "":
                                 break
 
-                        if not data_line:
+                        if not data_lines:
                             continue
+
+                        data_line = "\n".join(data_lines)
 
                         # Reset backoff on active data stream
                         if not data_received:
@@ -592,15 +602,15 @@ def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceS
         state_dict = state.model_dump()
 
         prop = event.get("property")
-        value = event.get("value")
-
         if prop is None:
             _LOGGER.warning("Received SSE event without 'property': %s", event)
             return state
 
-        if value is None:
+        if "value" not in event:
             _LOGGER.warning("Received SSE event without 'value': %s", event)
             return state
+
+        value = event.get("value")
 
         # Special case: top-level connectionState
         if prop == "connectionState":
@@ -610,14 +620,23 @@ def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceS
                 state_dict["connectionState"] = value
 
             # Normal property update
-            reported = state_dict.setdefault("properties", {}).setdefault(
-                "reported", {}
-            )
+            reported = state_dict.setdefault("properties", {})
+            if not isinstance(reported, dict):
+                reported = {}
+                state_dict["properties"] = reported
+
+            reported_target = reported.setdefault("reported", {})
+            if not isinstance(reported_target, dict):
+                reported_target = {}
+                reported["reported"] = reported_target
+
             path = prop.split("/")  # e.g. ["userSelections", "analogSpinSpeed"]
 
-            target = reported
+            target = reported_target
             for key in path[:-1]:
-                target = target.setdefault(key, {})
+                if not isinstance(target.get(key), dict):
+                    target[key] = {}
+                target = target[key]
 
             target[path[-1]] = value
 
