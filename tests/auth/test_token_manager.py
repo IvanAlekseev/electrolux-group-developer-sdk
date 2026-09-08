@@ -20,7 +20,7 @@ def generate_token(exp_seconds_from_now):
             "exp": time.time() + exp_seconds_from_now,
             "sub": "test-user"
         }
-    return jwt.encode(payload, "test-secret", algorithm="HS256")
+    return jwt.encode(payload, "test-secret-at-least-32-bytes-long", algorithm="HS256")
 
 
 ACCESS_TOKEN = generate_token(120)
@@ -240,10 +240,11 @@ class TestTokenManager():
         assert issubclass(InvalidGrantException, TokenRefreshFailedException)
 
     @pytest.mark.asyncio
-    async def test_get_auth_data_raises_invalid_grant_on_400(self):
+    @pytest.mark.parametrize("status_code", [400, 401])
+    async def test_get_auth_data_raises_invalid_grant_on_auth_error(self, status_code):
         token_manager = TokenManager(generate_token(-120), "mock_refresh", "mock_key")
         with aioresponses() as mocked:
-            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=400)
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=status_code)
             with pytest.raises(InvalidGrantException):
                 await token_manager.get_auth_data()
 
