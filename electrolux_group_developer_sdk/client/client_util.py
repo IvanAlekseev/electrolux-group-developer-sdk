@@ -83,6 +83,8 @@ async def request(
                                             f"Status: {response.status}, Body: {response_text}")
                             response.raise_for_status()
 
+                        await response.release()
+
         except aiohttp.ClientResponseError as e:
             if attempt == MAX_ATTEMPTS or e.status not in allow_retry_statuses:
                 raise e
