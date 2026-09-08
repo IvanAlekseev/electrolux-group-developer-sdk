@@ -1,14 +1,17 @@
 import asyncio
+import inspect
 import logging
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+import aiohttp
 import jwt
 
+from .auth_data import AuthData
 from .invalid_credentials_exception import InvalidCredentialsException
+from .invalid_grant_exception import InvalidGrantException
 from .invalid_token_exception import InvalidTokenException
 from .token_refresh_failed import TokenRefreshFailedException
-from .auth_data import AuthData
 from ..client.client_util import request
 from ..config import TOKEN_REVOKE_URL, TOKEN_REFRESH_URL, USER_EMAIL_URL
 from ..constants import GET, REFRESH_TOKEN, POST
@@ -39,6 +42,7 @@ class TokenManager:
         api_key: str,
         on_token_update: Optional[Callable[[str, str, str], None]] = None,
         refresh_buffer_seconds: float = 60.0,
+        on_auth_failed: Optional[Callable[..., Any]] = None,
     ):
         """Initialize the token manager."""
         if access_token is None:
@@ -46,7 +50,9 @@ class TokenManager:
             raise InvalidCredentialsException()
         self._on_token_update = on_token_update
         self.refresh_buffer_seconds = refresh_buffer_seconds
+        self.on_auth_failed = on_auth_failed
         self._refresh_lock = asyncio.Lock()
+        self._last_refresh_error: Optional[Exception] = None
         self._auth_data = AuthData(access_token, refresh_token, api_key)
         self.update(access_token, refresh_token, api_key)
 
@@ -129,10 +135,25 @@ class TokenManager:
                     refresh_token=data["refreshToken"],
                     api_key=auth_data.api_key,
                 )
+                self._last_refresh_error = None
 
                 return True
             except Exception as e:
                 _LOGGER.error("Error during token refresh: %s", e)
+                if (isinstance(e, aiohttp.ClientResponseError) and e.status == 400) or "invalid_grant" in str(e).lower():
+                    self._last_refresh_error = InvalidGrantException(f"Token refresh rejected (invalid_grant): {e}")
+                    if self.on_auth_failed:
+                        try:
+                            try:
+                                res = self.on_auth_failed(self._last_refresh_error)
+                            except TypeError:
+                                res = self.on_auth_failed()
+                            if inspect.isawaitable(res):
+                                await res
+                        except Exception as err:
+                            _LOGGER.warning("Error in on_auth_failed callback: %s", err)
+                else:
+                    self._last_refresh_error = e
                 return False
 
     async def revoke_token(self) -> bool:
@@ -161,6 +182,8 @@ class TokenManager:
         if force_refresh or not self.is_token_valid():
             refreshed = await self.refresh_token(force=force_refresh)
             if not refreshed:
+                if isinstance(self._last_refresh_error, InvalidGrantException):
+                    raise self._last_refresh_error
                 raise TokenRefreshFailedException("Token expired and refresh failed")
             auth_data = self._auth_data
 
