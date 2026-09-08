@@ -1118,6 +1118,9 @@ async def test_start_event_stream_auth_error_refreshes_token():
     # First attempt: 401 Unauthorized
     mock_resp_401 = MagicMock()
     mock_resp_401.status = 401
+    mock_resp_401.raise_for_status.side_effect = aiohttp.ClientResponseError(
+        request_info=MagicMock(), history=(), status=401, message="Unauthorized"
+    )
 
     # Second attempt: raise CancelledError to end test
     mock_session = MagicMock()
@@ -1128,7 +1131,22 @@ async def test_start_event_stream_auth_error_refreshes_token():
     mock_session.close = AsyncMock()
 
     with patch("aiohttp.ClientSession", return_value=mock_session):
-        with pytest.raises(asyncio.CancelledError):
-            await client.start_event_stream()
+        with patch.object(asyncio, "sleep", new_callable=AsyncMock) as mock_sleep:
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream()
 
-    mock_token_manager.refresh_token.assert_awaited_once()
+    mock_token_manager.refresh_token.assert_awaited_once_with(force=True)
+    assert mock_sleep.await_count >= 1
+
+
+def test_apply_sse_update_slashes_in_path():
+    """Verify that apply_sse_update handles leading, trailing, and normal slashes cleanly."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {}},
+    )
+    event = {"property": "/userSelections/timeToEnd/", "value": 45}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["userSelections"]["timeToEnd"] == 45

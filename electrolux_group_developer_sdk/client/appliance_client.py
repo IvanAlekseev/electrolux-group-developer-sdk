@@ -455,9 +455,7 @@ class ApplianceClient:
                 ) as resp:
                     if resp.status in (401, 403):
                         _LOGGER.warning("SSE stream returned HTTP %s. Refreshing auth token...", resp.status)
-                        await self._token_manager.refresh_token()
-                        current_backoff = initial_backoff
-                        continue
+                        await self._token_manager.refresh_token(force=True)
 
                     resp.raise_for_status()
 
@@ -630,7 +628,7 @@ def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceS
                 reported_target = {}
                 reported["reported"] = reported_target
 
-            path = prop.split("/")  # e.g. ["userSelections", "analogSpinSpeed"]
+            path = prop.strip("/").split("/")  # e.g. ["userSelections", "analogSpinSpeed"]
 
             target = reported_target
             for key in path[:-1]:
