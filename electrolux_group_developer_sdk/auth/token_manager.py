@@ -83,7 +83,7 @@ class TokenManager:
                 options={"verify_signature": False, "verify_exp": False},
             )
             exp = payload.get("exp")
-            if exp is None:
+            if exp is None or not isinstance(exp, (int, float)):
                 return False
 
             current_time = time.time()
@@ -94,7 +94,7 @@ class TokenManager:
             )
             return (exp - current_time) > buffer
 
-        except jwt.PyJWTError as e:
+        except (jwt.PyJWTError, TypeError) as e:
             _LOGGER.error("Access Token is invalid - %s", e)
             return False
 

@@ -329,3 +329,8 @@ class TestTokenManager():
         with pytest.raises(InvalidTokenException, match="Failed to decode token"):
             get_user_id_from_token("invalid-token-string")
 
+    def test_is_token_valid_non_numeric_exp(self):
+        token = jwt.encode({"sub": "test-user", "exp": "not-a-timestamp"}, "test-secret-at-least-32-bytes-long", algorithm="HS256")
+        manager = TokenManager(token, "mock_refresh_token", "mock_api_key")
+        assert manager.is_token_valid() is False
+
