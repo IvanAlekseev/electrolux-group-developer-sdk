@@ -112,7 +112,11 @@ class TokenManager:
         except Exception as e:
             _LOGGER.error("Error during token refresh: %s", e)
             if (isinstance(e, aiohttp.ClientResponseError) and e.status in (400, 401)) or "invalid_grant" in str(e).lower():
-                self._last_refresh_error = InvalidGrantException(f"Token refresh rejected (invalid_grant): {e}")
+                status_code = e.status if isinstance(e, aiohttp.ClientResponseError) else None
+                self._last_refresh_error = InvalidGrantException(
+                    f"Token refresh rejected (invalid_grant): {e}",
+                    status_code=status_code,
+                )
                 if self.on_auth_failed:
                     try:
                         try:
