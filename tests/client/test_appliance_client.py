@@ -11,6 +11,7 @@ from yarl import URL
 
 from electrolux_group_developer_sdk.auth.auth_data import AuthData
 from electrolux_group_developer_sdk.client.appliance_client import ApplianceClient, apply_sse_update
+from electrolux_group_developer_sdk.client.appliance_forbidden_exception import ApplianceForbiddenException
 from electrolux_group_developer_sdk.client.bad_credentials_exception import BadCredentialsException
 from electrolux_group_developer_sdk.client.client_exception import ApplianceClientException
 from electrolux_group_developer_sdk.client.dto.appliance import Appliance
@@ -1302,4 +1303,123 @@ async def test_start_event_stream_server_disconnected_error():
 
     assert len(closing_calls) == 1
     assert isinstance(closing_calls[0], (ConnectionError, aiohttp.ServerDisconnectedError))
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_state_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/state"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.get_appliance_state("test_app_id")
+
+            assert isinstance(exc_info.value, ApplianceClientException)
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_details_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE on get_appliance_details raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/info"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.get_appliance_details("test_app_id")
+
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_send_command_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE on send_command raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/command"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.put(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.send_command("test_app_id", {"executeCommand": "START"})
+
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_state_generic_403_raises_generic_client_exception():
+    """Verify that a 403 without FORBIDDEN_RESOURCE raises generic ApplianceClientException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/state"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={"error": "INVALID_SCOPE", "message": "Scope not granted"},
+            )
+
+            with pytest.raises(ApplianceClientException) as exc_info:
+                await client.get_appliance_state("test_app_id")
+
+            assert not isinstance(exc_info.value, ApplianceForbiddenException)
+            assert exc_info.value.status == 403
+
 

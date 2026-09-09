@@ -14,6 +14,7 @@ from electrolux_group_developer_sdk.auth.token_refresh_failed import TokenRefres
 from electrolux_group_developer_sdk.client.bad_credentials_exception import BadCredentialsException
 
 from .appliance_data_factory import appliance_data_factory
+from .appliance_forbidden_exception import ApplianceForbiddenException
 from .client_exception import ApplianceClientException
 from .client_util import request
 from .dto.appliance import Appliance
@@ -46,6 +47,14 @@ def _is_dam_appliance(appliance_id):
         return True
     else:
         return False
+
+
+def _is_forbidden_resource_error(error: ClientResponseError) -> bool:
+    """Check if ClientResponseError is a resource-level FORBIDDEN_RESOURCE error."""
+    if error.status != 403:
+        return False
+    msg = str(error).lower()
+    return "forbidden_resource" in msg or "not registered" in msg or "not owned" in msg
 
 
 def _build_user_agent(external_user_agent: Optional[str] = None) -> str:
@@ -229,6 +238,17 @@ class ApplianceClient:
             response = await self._send_authorized_request(GET, url)
             return ApplianceDetails(**response)
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Appliance {appliance_id} forbidden or not registered: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get appliance info: %s", e)
             raise ApplianceClientException(
                 f"Failed to get appliance info: {e}", status=e.status
@@ -267,6 +287,17 @@ class ApplianceClient:
 
             return ApplianceState(**response)
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Appliance {appliance_id} forbidden or not registered: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get appliance state: %s", e)
             raise ApplianceClientException(
                 f"Failed to get appliance state: {e}", status=e.status
@@ -301,6 +332,17 @@ class ApplianceClient:
             response = await self._send_authorized_request(PUT, url, commands)
             return response
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to send command to {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error sending command: %s", e)
             raise ApplianceClientException(
                 f"Failed to send command: {e}", status=e.status
@@ -335,6 +377,17 @@ class ApplianceClient:
 
             return maps_dict
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to get interactive maps for {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get interactive map: %s", e)
             raise ApplianceClientException(
                 f"Failed to get interactive maps: {e}", status=e.status
@@ -369,6 +422,17 @@ class ApplianceClient:
 
             return maps_dict
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to get memory maps for {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get memory maps: %s", e)
             raise ApplianceClientException(
                 f"Failed to get memory maps: {e}", status=e.status
