@@ -11,6 +11,7 @@ from yarl import URL
 
 from electrolux_group_developer_sdk.auth.auth_data import AuthData
 from electrolux_group_developer_sdk.client.appliance_client import ApplianceClient, apply_sse_update
+from electrolux_group_developer_sdk.client.appliance_forbidden_exception import ApplianceForbiddenException
 from electrolux_group_developer_sdk.client.bad_credentials_exception import BadCredentialsException
 from electrolux_group_developer_sdk.client.client_exception import ApplianceClientException
 from electrolux_group_developer_sdk.client.dto.appliance import Appliance
@@ -1073,4 +1074,352 @@ async def test_request_html_proxy_error_truncation():
 
             # Exception message should not contain all 10,000 characters
             assert len(str(exc_info.value)) < 3000
+
+
+def test_apply_sse_update_null_value():
+    """Verify that apply_sse_update preserves valid null/None values (e.g. timeToEnd reset)."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {"userSelections": {"timeToEnd": 300}}},
+    )
+    event = {"property": "userSelections/timeToEnd", "value": None}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["userSelections"]["timeToEnd"] is None
+
+
+def test_apply_sse_update_missing_value_ignored():
+    """Verify that events without a 'value' field are ignored with a warning."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {"timeToEnd": 300}},
+    )
+    event = {"property": "timeToEnd"}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["timeToEnd"] == 300
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_multiline_sse_event():
+    """Verify that start_event_stream conforms to WHATWG SSE by joining multi-line data fields."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    received_events = []
+    client.add_listener("test_app_1", lambda ev: received_events.append(ev))
+
+    protocol = MagicMock()
+    reader = aiohttp.StreamReader(protocol, limit=2**16)
+    # Feed an SSE event split across two data: lines
+    reader.feed_data(
+        b'data: {"applianceId": "test_app_1",\n'
+        b'data: "property": "timeToEnd", "value": 60}\n\n'
+    )
+    reader.feed_eof()
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content = reader
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream()
+
+    assert len(received_events) == 1
+    assert received_events[0] == {
+        "applianceId": "test_app_1",
+        "property": "timeToEnd",
+        "value": 60,
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_auth_error_refreshes_token():
+    """Verify that receiving 401 or 403 on SSE connection triggers token refresh."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    mock_token_manager.refresh_token = AsyncMock()
+
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    # First attempt: 401 Unauthorized
+    mock_resp_401 = MagicMock()
+    mock_resp_401.status = 401
+    mock_resp_401.raise_for_status.side_effect = aiohttp.ClientResponseError(
+        request_info=MagicMock(), history=(), status=401, message="Unauthorized"
+    )
+
+    # Second attempt: raise CancelledError to end test
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(
+        side_effect=[mock_resp_401, asyncio.CancelledError("Stop test")]
+    )
+    mock_session.get.return_value.__aexit__ = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", new_callable=AsyncMock) as mock_sleep:
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream()
+
+    mock_token_manager.refresh_token.assert_awaited_once_with(force=True)
+    assert mock_sleep.await_count >= 1
+
+
+def test_apply_sse_update_slashes_in_path():
+    """Verify that apply_sse_update handles leading, trailing, and normal slashes cleanly."""
+    state = ApplianceState(
+        applianceId="test_1",
+        connectionState="connected",
+        status="enabled",
+        properties={"reported": {}},
+    )
+    event = {"property": "/userSelections/timeToEnd/", "value": 45}
+    updated = apply_sse_update(state, event)
+    assert updated.properties["reported"]["userSelections"]["timeToEnd"] == 45
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_handles_transfer_encoding_payload_error():
+    """Verify that start_event_stream handles aiohttp.ClientPayloadError (TransferEncodingError) gracefully as a connection drop."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    closing_calls = []
+
+    async def closing_callback(err):
+        closing_calls.append(err)
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content.readline = AsyncMock(
+        side_effect=aiohttp.ClientPayloadError(
+            "Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>"
+        )
+    )
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock(return_value=False)
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream(
+                    do_on_livestream_closing_list=[closing_callback]
+                )
+
+    assert len(closing_calls) == 1
+    assert isinstance(closing_calls[0], ConnectionError)
+    assert "SSE stream payload error" in str(closing_calls[0])
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_server_disconnected_error():
+    """Verify that start_event_stream handles aiohttp.ServerDisconnectedError cleanly."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    closing_calls = []
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content.readline = AsyncMock(
+        side_effect=aiohttp.ServerDisconnectedError("Server disconnected")
+    )
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock(return_value=False)
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream(
+                    do_on_livestream_closing_list=[lambda err: closing_calls.append(err)]
+                )
+
+    assert len(closing_calls) == 1
+    assert isinstance(closing_calls[0], (ConnectionError, aiohttp.ServerDisconnectedError))
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_state_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/state"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.get_appliance_state("test_app_id")
+
+            assert isinstance(exc_info.value, ApplianceClientException)
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_details_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE on get_appliance_details raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/info"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.get_appliance_details("test_app_id")
+
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_send_command_forbidden_resource():
+    """Verify that 403 FORBIDDEN_RESOURCE on send_command raises ApplianceForbiddenException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/command"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.put(
+                url,
+                status=403,
+                payload={
+                    "error": "FORBIDDEN_RESOURCE",
+                    "message": "Resource is not owned by client or appliance is not registered",
+                },
+            )
+
+            with pytest.raises(ApplianceForbiddenException) as exc_info:
+                await client.send_command("test_app_id", {"executeCommand": "START"})
+
+            assert exc_info.value.status == 403
+            assert exc_info.value.error_code == "FORBIDDEN_RESOURCE"
+
+
+@pytest.mark.asyncio
+async def test_get_appliance_state_generic_403_raises_generic_client_exception():
+    """Verify that a 403 without FORBIDDEN_RESOURCE raises generic ApplianceClientException."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances/test_app_id/state"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=403,
+                payload={"error": "INVALID_SCOPE", "message": "Scope not granted"},
+            )
+
+            with pytest.raises(ApplianceClientException) as exc_info:
+                await client.get_appliance_state("test_app_id")
+
+            assert not isinstance(exc_info.value, ApplianceForbiddenException)
+            assert exc_info.value.status == 403
+
 

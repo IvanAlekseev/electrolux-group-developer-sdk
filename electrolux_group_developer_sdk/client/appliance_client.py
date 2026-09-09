@@ -14,6 +14,7 @@ from electrolux_group_developer_sdk.auth.token_refresh_failed import TokenRefres
 from electrolux_group_developer_sdk.client.bad_credentials_exception import BadCredentialsException
 
 from .appliance_data_factory import appliance_data_factory
+from .appliance_forbidden_exception import ApplianceForbiddenException
 from .client_exception import ApplianceClientException
 from .client_util import request
 from .dto.appliance import Appliance
@@ -46,6 +47,14 @@ def _is_dam_appliance(appliance_id):
         return True
     else:
         return False
+
+
+def _is_forbidden_resource_error(error: ClientResponseError) -> bool:
+    """Check if ClientResponseError is a resource-level FORBIDDEN_RESOURCE error."""
+    if error.status != 403:
+        return False
+    msg = str(error).lower()
+    return "forbidden_resource" in msg or "not registered" in msg or "not owned" in msg
 
 
 def _build_user_agent(external_user_agent: Optional[str] = None) -> str:
@@ -229,6 +238,17 @@ class ApplianceClient:
             response = await self._send_authorized_request(GET, url)
             return ApplianceDetails(**response)
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Appliance {appliance_id} forbidden or not registered: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get appliance info: %s", e)
             raise ApplianceClientException(
                 f"Failed to get appliance info: {e}", status=e.status
@@ -267,6 +287,17 @@ class ApplianceClient:
 
             return ApplianceState(**response)
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Appliance {appliance_id} forbidden or not registered: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get appliance state: %s", e)
             raise ApplianceClientException(
                 f"Failed to get appliance state: {e}", status=e.status
@@ -301,6 +332,17 @@ class ApplianceClient:
             response = await self._send_authorized_request(PUT, url, commands)
             return response
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to send command to {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error sending command: %s", e)
             raise ApplianceClientException(
                 f"Failed to send command: {e}", status=e.status
@@ -335,6 +377,17 @@ class ApplianceClient:
 
             return maps_dict
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to get interactive maps for {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get interactive map: %s", e)
             raise ApplianceClientException(
                 f"Failed to get interactive maps: {e}", status=e.status
@@ -369,6 +422,17 @@ class ApplianceClient:
 
             return maps_dict
         except aiohttp.ClientResponseError as e:
+            if _is_forbidden_resource_error(e):
+                _LOGGER.warning(
+                    "Appliance %s is not registered or temporarily unowned (FORBIDDEN_RESOURCE): %s",
+                    appliance_id,
+                    e,
+                )
+                raise ApplianceForbiddenException(
+                    f"Failed to get memory maps for {appliance_id}: {e}",
+                    status=e.status,
+                    error_code="FORBIDDEN_RESOURCE",
+                ) from e
             _LOGGER.error("Error during get memory maps: %s", e)
             raise ApplianceClientException(
                 f"Failed to get memory maps: {e}", status=e.status
@@ -453,6 +517,12 @@ class ApplianceClient:
                     timeout=ClientTimeout(total=None, sock_connect=10, sock_read=120),
                     headers=headers,
                 ) as resp:
+                    if resp.status in (401, 403):
+                        _LOGGER.warning("SSE stream returned HTTP %s. Refreshing auth token...", resp.status)
+                        await self._token_manager.refresh_token(force=True)
+
+                    resp.raise_for_status()
+
                     _LOGGER.info("Connected to SSE stream at %s", url)
 
                     if do_on_livestream_opening_list:
@@ -461,7 +531,7 @@ class ApplianceClient:
                             await callback()
 
                     while True:
-                        data_line = None
+                        data_lines: list[str] = []
 
                         while True:  # read one SSE event
                             if resp.closed:
@@ -473,20 +543,25 @@ class ApplianceClient:
                             except (TimeoutError, asyncio.TimeoutError) as ex:
                                 _LOGGER.warning("SSE stream read timed out: %s", ex)
                                 raise ConnectionError("SSE stream read timed out") from ex
+                            except aiohttp.ClientPayloadError as ex:
+                                _LOGGER.warning("SSE stream payload interrupted by server: %s", ex)
+                                raise ConnectionError(f"SSE stream payload error: {ex}") from ex
 
                             if not line:
                                 _LOGGER.warning("SSE connection ended by server")
                                 raise ConnectionError("SSE connection closed by server")
 
-                            line_str = line.decode().strip()
+                            line_str = line.decode("utf-8", errors="replace").strip()
 
                             if line_str.startswith("data:"):
-                                data_line = line_str.removeprefix("data:").strip()
+                                data_lines.append(line_str.removeprefix("data:").strip())
                             elif line_str == "":
                                 break
 
-                        if not data_line:
+                        if not data_lines:
                             continue
+
+                        data_line = "\n".join(data_lines)
 
                         # Reset backoff on active data stream
                         if not data_received:
@@ -514,7 +589,7 @@ class ApplianceClient:
             except aiohttp.ClientResponseError as ex:
                 stream_error = ex
                 _LOGGER.error("SSE HTTP error: %s - %s", ex.status, ex.message)
-            except ConnectionError as ex:
+            except (ConnectionError, aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError) as ex:
                 stream_error = ex
                 _LOGGER.error("SSE connection error: %s", ex)
             except asyncio.CancelledError as ex:
@@ -592,15 +667,15 @@ def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceS
         state_dict = state.model_dump()
 
         prop = event.get("property")
-        value = event.get("value")
-
         if prop is None:
             _LOGGER.warning("Received SSE event without 'property': %s", event)
             return state
 
-        if value is None:
+        if "value" not in event:
             _LOGGER.warning("Received SSE event without 'value': %s", event)
             return state
+
+        value = event.get("value")
 
         # Special case: top-level connectionState
         if prop == "connectionState":
@@ -610,14 +685,23 @@ def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceS
                 state_dict["connectionState"] = value
 
             # Normal property update
-            reported = state_dict.setdefault("properties", {}).setdefault(
-                "reported", {}
-            )
-            path = prop.split("/")  # e.g. ["userSelections", "analogSpinSpeed"]
+            reported = state_dict.setdefault("properties", {})
+            if not isinstance(reported, dict):
+                reported = {}
+                state_dict["properties"] = reported
 
-            target = reported
+            reported_target = reported.setdefault("reported", {})
+            if not isinstance(reported_target, dict):
+                reported_target = {}
+                reported["reported"] = reported_target
+
+            path = prop.strip("/").split("/")  # e.g. ["userSelections", "analogSpinSpeed"]
+
+            target = reported_target
             for key in path[:-1]:
-                target = target.setdefault(key, {})
+                if not isinstance(target.get(key), dict):
+                    target[key] = {}
+                target = target[key]
 
             target[path[-1]] = value
 
