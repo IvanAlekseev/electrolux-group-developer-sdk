@@ -128,6 +128,10 @@ class TokenManager:
             if not force and self.is_token_valid():
                 return True
 
+            if not self._auth_data or not self._auth_data.refresh_token:
+                _LOGGER.error("Refresh token is missing or session was revoked")
+                return False
+
             payload = {REFRESH_TOKEN: self._auth_data.refresh_token}
 
             try:
@@ -135,7 +139,7 @@ class TokenManager:
 
                 self.update(
                     access_token=data["accessToken"],
-                    refresh_token=data["refreshToken"],
+                    refresh_token=data.get("refreshToken", self._auth_data.refresh_token),
                     api_key=auth_data.api_key,
                 )
                 self._last_refresh_error = None
