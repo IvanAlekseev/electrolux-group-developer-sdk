@@ -1015,3 +1015,62 @@ async def test_request_html_proxy_error_fallback():
                 await client.get_appliances()
 
             assert "500 Internal Server Error" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_request_respects_retry_after_header():
+    """Verify that request respects the Retry-After header on 429 status code."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances"
+
+    sleep_calls = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    with patch("asyncio.sleep", side_effect=fake_sleep):
+        with aioresponses() as mocked:
+            mocked.get(url, status=429, headers={"Retry-After": "12"})
+            mocked.get(url, payload=[])
+
+            appliances = await client.get_appliances()
+            assert appliances == []
+            retry_sleeps = [s for s in sleep_calls if s >= 12.0]
+            assert len(retry_sleeps) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_html_proxy_error_truncation():
+    """Verify that non-JSON proxy error pages exceeding 2KB are truncated to prevent memory bloat."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    url = "https://api.developer.electrolux.one/api/v1/appliances"
+
+    huge_body = "x" * 10000
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with aioresponses() as mocked:
+            mocked.get(
+                url,
+                status=500,
+                body=huge_body,
+                content_type="text/html",
+            )
+
+            with pytest.raises(ApplianceClientException) as exc_info:
+                await client.get_appliances()
+
+            # Exception message should not contain all 10,000 characters
+            assert len(str(exc_info.value)) < 3000
+

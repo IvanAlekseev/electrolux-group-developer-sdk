@@ -49,6 +49,7 @@ async def request(
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         await rate_limiter.acquire()
+        retry_after_delay: Optional[float] = None
 
         try:
             async with concurrency_semaphore:
@@ -64,7 +65,7 @@ async def request(
                             try:
                                 response_body = await response.json()
                             except (aiohttp.ContentTypeError, ValueError):
-                                response_body = await response.text()
+                                response_body = (await response.text())[:2048]
                             status = response.status
                             if 400 <= response.status < 600:
                                 raise aiohttp.ClientResponseError(
@@ -78,10 +79,17 @@ async def request(
                             return response_body
 
                         if attempt == MAX_ATTEMPTS:
-                            response_text = await response.text()
+                            response_text = (await response.text())[:2048]
                             _LOGGER.warning(f"Request failed after {MAX_ATTEMPTS} attempts. "
                                             f"Status: {response.status}, Body: {response_text}")
                             response.raise_for_status()
+
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                retry_after_delay = float(retry_after)
+                            except (ValueError, TypeError):
+                                pass
 
                         await response.release()
 
@@ -96,6 +104,8 @@ async def request(
 
         # Wait before next attempt
         backoff = min(INITIAL_BACKOFF * 2 ** (attempt - 1), MAX_BACKOFF)
+        if retry_after_delay is not None:
+            backoff = max(backoff, retry_after_delay)
         jitter = random.uniform(0, backoff * 0.3)
         await asyncio.sleep(backoff + jitter)
 
