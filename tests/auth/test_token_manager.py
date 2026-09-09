@@ -347,6 +347,7 @@ class TestTokenManager():
     async def test_get_auth_data_raises_invalid_grant_on_auth_error(self, status_code):
         token_manager = TokenManager(generate_token(-120), "mock_refresh", "mock_key")
         with aioresponses() as mocked:
+            mocked.post("https://api.developer.electrolux.one/api/v1/token/refresh", status=status_code)
             with pytest.raises(InvalidGrantException) as exc_info:
                 await token_manager.get_auth_data()
             assert exc_info.value.status_code == status_code
