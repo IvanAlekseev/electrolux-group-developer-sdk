@@ -479,6 +479,9 @@ class ApplianceClient:
                             except (TimeoutError, asyncio.TimeoutError) as ex:
                                 _LOGGER.warning("SSE stream read timed out: %s", ex)
                                 raise ConnectionError("SSE stream read timed out") from ex
+                            except aiohttp.ClientPayloadError as ex:
+                                _LOGGER.warning("SSE stream payload interrupted by server: %s", ex)
+                                raise ConnectionError(f"SSE stream payload error: {ex}") from ex
 
                             if not line:
                                 _LOGGER.warning("SSE connection ended by server")
@@ -522,7 +525,7 @@ class ApplianceClient:
             except aiohttp.ClientResponseError as ex:
                 stream_error = ex
                 _LOGGER.error("SSE HTTP error: %s - %s", ex.status, ex.message)
-            except ConnectionError as ex:
+            except (ConnectionError, aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError) as ex:
                 stream_error = ex
                 _LOGGER.error("SSE connection error: %s", ex)
             except asyncio.CancelledError as ex:

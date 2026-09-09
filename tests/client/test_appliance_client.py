@@ -1208,3 +1208,98 @@ def test_apply_sse_update_slashes_in_path():
     event = {"property": "/userSelections/timeToEnd/", "value": 45}
     updated = apply_sse_update(state, event)
     assert updated.properties["reported"]["userSelections"]["timeToEnd"] == 45
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_handles_transfer_encoding_payload_error():
+    """Verify that start_event_stream handles aiohttp.ClientPayloadError (TransferEncodingError) gracefully as a connection drop."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    closing_calls = []
+
+    async def closing_callback(err):
+        closing_calls.append(err)
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content.readline = AsyncMock(
+        side_effect=aiohttp.ClientPayloadError(
+            "Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>"
+        )
+    )
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock(return_value=False)
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream(
+                    do_on_livestream_closing_list=[closing_callback]
+                )
+
+    assert len(closing_calls) == 1
+    assert isinstance(closing_calls[0], ConnectionError)
+    assert "SSE stream payload error" in str(closing_calls[0])
+
+
+@pytest.mark.asyncio
+async def test_start_event_stream_server_disconnected_error():
+    """Verify that start_event_stream handles aiohttp.ServerDisconnectedError cleanly."""
+    mock_token_manager = MagicMock()
+    mock_token_manager.get_auth_data = AsyncMock(
+        return_value=AuthData(
+            access_token="mock_token", refresh_token="mock_refresh", api_key="mock_key"
+        )
+    )
+    client = ApplianceClient(mock_token_manager)
+    client.get_livestream_config = AsyncMock(
+        return_value=LivestreamConfig(
+            url="https://api.developer.electrolux.one/livestream", appliances=[]
+        )
+    )
+
+    closing_calls = []
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.closed = False
+    mock_resp.content.readline = AsyncMock(
+        side_effect=aiohttp.ServerDisconnectedError("Server disconnected")
+    )
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_session.get.return_value.__aexit__ = AsyncMock(return_value=False)
+    mock_session.close = AsyncMock()
+
+    async def fake_sleep(duration):
+        raise asyncio.CancelledError()
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(asyncio, "sleep", side_effect=fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start_event_stream(
+                    do_on_livestream_closing_list=[lambda err: closing_calls.append(err)]
+                )
+
+    assert len(closing_calls) == 1
+    assert isinstance(closing_calls[0], (ConnectionError, aiohttp.ServerDisconnectedError))
+
