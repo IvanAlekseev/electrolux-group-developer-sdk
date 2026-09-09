@@ -352,3 +352,45 @@ class TestTokenManager():
         manager = TokenManager(token, "mock_refresh_token", "mock_api_key")
         assert manager.is_token_valid() is False
 
+    @pytest.mark.asyncio
+    async def test_refresh_token_optional_refresh_token_fallback(self):
+        """Verify RFC 6749 Section 5.1: if response omits refreshToken, previous refresh token is retained."""
+        token_manager = TokenManager(
+            access_token=EXPIRED_ACCESS_TOKEN,
+            refresh_token="initial_refresh_token",
+            api_key="mock_api_key",
+        )
+        refresh_url = "https://api.developer.electrolux.one/api/v1/token/refresh"
+
+        with aioresponses() as mocked:
+            # Server returns ONLY accessToken (no refreshToken in JSON)
+            mocked.post(
+                refresh_url,
+                payload={
+                    "accessToken": NEW_ACCESS_TOKEN,
+                },
+            )
+            success = await token_manager.refresh_token()
+            assert success is True
+            assert token_manager._auth_data.access_token == NEW_ACCESS_TOKEN
+            assert token_manager._auth_data.refresh_token == "initial_refresh_token"
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_post_revocation_race_condition(self):
+        """Verify that if auth_data is cleared while waiting on lock, refresh_token exits cleanly without AttributeError."""
+        token_manager = TokenManager(
+            access_token=EXPIRED_ACCESS_TOKEN,
+            refresh_token="mock_refresh",
+            api_key="mock_api_key",
+        )
+        async with token_manager._refresh_lock:
+            # Launch refresh_token while lock is held; passes initial credential check, then waits on lock
+            task = asyncio.create_task(token_manager.refresh_token())
+            await asyncio.sleep(0.01)
+            # Clear auth_data as revoke_token would do
+            token_manager._auth_data = None
+
+        # Lock is released, waiting coroutine enters lock and exits cleanly
+        result = await task
+        assert result is False
+
