@@ -8,6 +8,8 @@ from typing import Optional, Dict, Any, List, Union
 
 import aiohttp
 from aiohttp import ClientTimeout, ClientResponseError
+
+from .rate_limiter import RateLimiter
 from aiohttp.hdrs import USER_AGENT, AUTHORIZATION
 
 from electrolux_group_developer_sdk.auth.token_refresh_failed import TokenRefreshFailedException
@@ -131,6 +133,8 @@ class ApplianceClient:
         self._sse_listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
         self._external_user_agent = external_user_agent
         self._session = session
+        self._rate_limiter = RateLimiter(max_calls=10, period=1.0)
+        self._concurrency_semaphore = asyncio.Semaphore(5)
 
     async def test_connection(self) -> None:
         try:
@@ -659,6 +663,8 @@ class ApplianceClient:
             headers=headers,
             json_body=json_body,
             session=self._session,
+            rate_limiter=self._rate_limiter,
+            concurrency_semaphore=self._concurrency_semaphore,
         )
 
 def apply_sse_update(state: ApplianceState, event: dict[str, Any]) -> ApplianceState:

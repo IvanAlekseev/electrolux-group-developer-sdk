@@ -22,14 +22,13 @@ class RateLimiter:
 
     async def acquire(self):
         """Wait until the rate limit allows a new call."""
-        async with self._lock:
-            now = time.monotonic()
-            while len(self.calls) >= self.max_calls:
-                oldest = self.calls[0]
-                if now - oldest > self.period:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                while self.calls and now - self.calls[0] > self.period:
                     self.calls.popleft()
-                else:
-                    sleep_time = self.period - (now - oldest)
-                    await asyncio.sleep(sleep_time)
-                    now = time.monotonic()
-            self.calls.append(now)
+                if len(self.calls) < self.max_calls:
+                    self.calls.append(now)
+                    return
+                sleep_time = self.period - (now - self.calls[0])
+            await asyncio.sleep(max(0, sleep_time))

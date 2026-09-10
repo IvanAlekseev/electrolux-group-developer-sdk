@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Optional, Dict, Any
 
 import aiohttp
@@ -14,9 +14,6 @@ MAX_ATTEMPTS = 3
 RETRY_STATUS_CODES = {429, 502, 503, 504}
 INITIAL_BACKOFF = 1
 MAX_BACKOFF = 30
-
-rate_limiter = RateLimiter(max_calls=10, period=1.0)  # 10 calls per second
-concurrency_semaphore = asyncio.Semaphore(5)  # 5 concurrent calls
 
 
 @asynccontextmanager
@@ -34,6 +31,8 @@ async def request(
         headers: Optional[Dict[str, str]] = None,
         json_body: Optional[Dict[str, Any]] = None,
         session: Optional[aiohttp.ClientSession] = None,
+        rate_limiter: Optional[RateLimiter] = None,
+        concurrency_semaphore: Optional[asyncio.Semaphore] = None,
 ) -> Any:
     """
     Make an HTTP request with retry, rate limiting, and concurrency control.
@@ -44,15 +43,23 @@ async def request(
         headers: Optional HTTP headers
         json_body: Optional JSON body for POST/PUT
         session: Optional external aiohttp ClientSession to reuse
+        rate_limiter: Optional RateLimiter instance for throttling requests.
+            When None, no rate limiting is applied (suitable for infrequent
+            calls such as token refresh or revoke).
+        concurrency_semaphore: Optional asyncio.Semaphore for limiting
+            concurrent in-flight requests. When None, no concurrency
+            limit is applied.
     """
     allow_retry_statuses = RETRY_STATUS_CODES
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        await rate_limiter.acquire()
+        if rate_limiter is not None:
+            await rate_limiter.acquire()
         retry_after_delay: Optional[float] = None
 
         try:
-            async with concurrency_semaphore:
+            sem = concurrency_semaphore if concurrency_semaphore is not None else nullcontext()
+            async with sem:
                 async with _get_session(session) as client_session:
                     async with client_session.request(
                             method=method,

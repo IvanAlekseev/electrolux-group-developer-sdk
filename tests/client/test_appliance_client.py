@@ -1423,3 +1423,22 @@ async def test_get_appliance_state_generic_403_raises_generic_client_exception()
             assert exc_info.value.status == 403
 
 
+def test_appliance_client_instances_have_independent_rate_limiters():
+    """Verify that each ApplianceClient has its own rate limiter and
+    concurrency semaphore, not shared module-level singletons."""
+    mock_token_manager_a = MagicMock()
+    mock_token_manager_b = MagicMock()
+
+    client_a = ApplianceClient(mock_token_manager_a)
+    client_b = ApplianceClient(mock_token_manager_b)
+
+    # Different instances must have distinct rate limiter and semaphore objects
+    assert client_a._rate_limiter is not client_b._rate_limiter
+    assert client_a._concurrency_semaphore is not client_b._concurrency_semaphore
+
+    # Verify attributes
+    assert client_a._rate_limiter.max_calls == 10
+    assert client_a._rate_limiter.period == 1.0
+
+
+
