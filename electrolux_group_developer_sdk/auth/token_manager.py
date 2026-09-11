@@ -161,9 +161,26 @@ class TokenManager:
         if cb_to_call:
             try:
                 try:
-                    res = cb_to_call(cb_arg)
+                    sig = inspect.signature(cb_to_call)
+                    accepts_arg = any(
+                        p.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.VAR_POSITIONAL,
+                        )
+                        for p in sig.parameters.values()
+                    )
+                except (ValueError, TypeError):
+                    # Builtins/functools.partials without introspectable
+                    # signature: assume 1-arg, fall back to 0-arg below.
+                    accepts_arg = True
+                try:
+                    res = cb_to_call(cb_arg) if accepts_arg else cb_to_call()
                 except TypeError:
-                    res = cb_to_call()
+                    if accepts_arg:
+                        raise
+                    res = cb_to_call(cb_arg)
                 if inspect.isawaitable(res):
                     await res
             except Exception as err:
